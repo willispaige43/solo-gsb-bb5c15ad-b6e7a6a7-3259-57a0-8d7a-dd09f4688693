@@ -12,6 +12,11 @@ function currentMode() {
   return el ? el.value : 'single';
 }
 
+function currentObjective() {
+  const el = document.querySelector('input[name="objective"]:checked');
+  return el ? el.value : 'more-pieces';
+}
+
 function colorFor(id) {
   let h = 0;
   for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -239,6 +244,9 @@ function readForm() {
       throw new Error('最多用纸张数须为 1～500 的整数。');
     }
     payload.maxSheets = maxSheets;
+  } else if (mode === 'single') {
+    // 单张试排：方案比选目标（优先多排 / 优先省刀）
+    payload.objective = currentObjective();
   }
 
   return payload;
@@ -466,6 +474,83 @@ function renderUnplaced(r, heading = '排不下的成品') {
       <tbody>${rows}</tbody>
     </table>
   `;
+}
+
+/* ---------------- 方案比选（单张试排三策略择优） ---------------- */
+
+let compareState = null; // 最近一次方案比选结果
+
+const OBJECTIVE_LABELS = {
+  'more-pieces': '优先多排（已排件数 → 已排面积 → 刀数少 → 策略顺序）',
+  'fewer-cuts': '优先省刀（排除空方案后：刀数少 → 已排面积 → 已排件数 → 策略顺序）',
+};
+
+function renderCompare(data) {
+  compareState = data;
+  const best = data.best;
+
+  // 候选指标对比表（最佳行高亮）
+  const rows = data.candidates.map((c) => `
+    <tr class="${c.selected ? 'winner' : ''}">
+      <td>${c.label}${c.selected ? '<span class="best-badge">最佳</span>' : ''}</td>
+      <td class="num">${c.metrics.piecesPlaced} / ${c.metrics.piecesTotal}</td>
+      <td class="num">${fmt(c.metrics.placedArea)}</td>
+      <td class="num">${(c.metrics.areaRatio * 100).toFixed(1)}%</td>
+      <td class="num">${c.metrics.cutsTotal}</td>
+    </tr>`).join('');
+
+  // 逐项选择依据
+  const steps = data.decision.map((d) => `<li><b>${d.label}</b>：${d.note}</li>`).join('');
+
+  $('compareBar').innerHTML = `
+    <div class="stop-reason ${best ? 'ok' : 'warn'}">${best
+      ? `✔ 最佳方案：<b>${best.label}</b>（已排 ${best.metrics.piecesPlaced} 件 · ${fmt(best.metrics.placedArea)} mm² · ${best.metrics.cutsTotal} 刀）`
+      : '⚠ 三种策略均未排入任何成品，不指定最佳方案（未排原因见下方清单）。'}</div>
+    <div class="compare-obj">比选目标：${OBJECTIVE_LABELS[data.objective] || data.objective}</div>
+    <table class="compare-table">
+      <thead><tr>
+        <th>策略</th><th class="num">已排/总件数</th><th class="num">已排面积 (mm²)</th>
+        <th class="num">面积占比</th><th class="num">刀数</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <details class="decision" open>
+      <summary>逐项选择依据</summary>
+      <ol>${steps}</ol>
+    </details>
+  `;
+  $('compareBar').hidden = false;
+
+  // 候选标签页（突出最佳项）
+  const tabs = $('sheetTabs');
+  tabs.innerHTML = data.candidates.map((c, i) =>
+    `<button type="button" data-i="${i}" class="${c.selected ? 'best' : ''}">${c.label}`
+    + `（${c.metrics.piecesPlaced} 件 · ${c.metrics.cutsTotal} 刀）${c.selected ? ' ★最佳' : ''}</button>`
+  ).join('');
+  [...tabs.querySelectorAll('button')].forEach((b) =>
+    b.addEventListener('click', () => showCompareSheet(Number(b.dataset.i)))
+  );
+  tabs.hidden = false;
+
+  // 默认展示最佳方案；全部排不进时展示首个候选（其未排清单即现有未排原因）
+  const bestIdx = data.candidates.findIndex((c) => c.selected);
+  showCompareSheet(bestIdx >= 0 ? bestIdx : 0);
+}
+
+function showCompareSheet(i) {
+  if (!compareState || !compareState.candidates[i]) return;
+  setActiveTab(i);
+  const sheet = compareState.candidates[i].layout;
+  renderStats(sheet);
+  renderSvg(sheet);
+  renderCutList(sheet);
+  renderUnplaced(sheet);
+}
+
+function clearCompareUi() {
+  compareState = null;
+  $('compareBar').hidden = true;
+  $('compareBar').innerHTML = '';
 }
 
 /* ---------------- 批量排产 ---------------- */
@@ -900,7 +985,7 @@ async function generate() {
   $('generate').disabled = true;
   try {
     const url = mode === 'cost' ? '/api/layout/cost'
-      : mode === 'batch' ? '/api/layout/batch' : '/api/layout';
+      : mode === 'batch' ? '/api/layout/batch' : '/api/layout/compare';
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -910,18 +995,17 @@ async function generate() {
     if (!resp.ok) throw new Error(data.error || '排样失败');
     if (mode === 'cost') {
       clearBatchUi();
+      clearCompareUi();
       renderCost(data);
     } else if (mode === 'batch') {
       clearCostUi();
+      clearCompareUi();
       renderBatch(data);
     } else {
       clearBatchUi();
       clearCostUi();
       clearOrderSummary();
-      renderStats(data);
-      renderSvg(data);
-      renderCutList(data);
-      renderUnplaced(data);
+      renderCompare(data);
     }
   } catch (e) {
     errBox.textContent = e.message;
@@ -945,6 +1029,8 @@ document.querySelectorAll('input[name="mode"]').forEach((r) =>
     const cost = mode === 'cost';
     $('batchOpts').hidden = !batch;
     $('costOpts').hidden = !cost;
+    // 方案比选目标仅对单张试排有意义
+    $('compareOpts').hidden = mode !== 'single';
     // 订单隔离与成套生产仅对批量 / 多纸型排产有意义
     $('isolateOpts').hidden = mode === 'single';
     $('kitOpts').hidden = mode === 'single';

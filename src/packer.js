@@ -197,6 +197,39 @@ function lexLess(a, b) {
   return false;
 }
 
+/* ---------------- 件序策略（sort strategies） ---------------- */
+
+// 件序比较子：均按降序（大者先排）；键相同的件由稳定排序保持录入相对顺序
+const byAreaDesc = (a, b) => b.w * b.h - a.w * a.h;
+const byLongestSideDesc = (a, b) => Math.max(b.w, b.h) - Math.max(a.w, a.h);
+const byShortestSideDesc = (a, b) => Math.min(b.w, b.h) - Math.min(a.w, a.h);
+const byAspectDiffDesc = (a, b) => Math.abs(b.w - b.h) - Math.abs(a.w - a.h);
+
+/** 依次按键比较，全部相同返回 0（交由稳定排序保持录入顺序，保证确定性） */
+function chainCompare(...fns) {
+  return (a, b) => {
+    for (const fn of fns) {
+      const d = fn(a, b);
+      if (d !== 0) return d;
+    }
+    return 0;
+  };
+}
+
+/**
+ * 三种确定性排样策略（仅件序不同，放置评分 / 切分 / 纹向规则完全一致）：
+ *  - area-desc         面积降序：面积 → 最长边 → 最短边
+ *  - longest-side-desc 最长边降序（单张默认，保持旧行为）：最长边 → 面积 → 最短边
+ *  - aspect-diff-desc  宽高差降序：|宽−高| → 面积 → 最长边 → 最短边
+ */
+const PIECE_SORTS = {
+  'area-desc': chainCompare(byAreaDesc, byLongestSideDesc, byShortestSideDesc),
+  'longest-side-desc': chainCompare(byLongestSideDesc, byAreaDesc, byShortestSideDesc),
+  'aspect-diff-desc': chainCompare(byAspectDiffDesc, byAreaDesc, byLongestSideDesc, byShortestSideDesc),
+};
+
+const DEFAULT_SORT_STRATEGY = 'longest-side-desc';
+
 /**
  * 在 W×H 区域左上角放置 w×h 后，计算切分方案（纯几何）。
  * 规则：
@@ -338,9 +371,18 @@ function collectFreeLeaves(node, out) {
  *   paperGrain: 'along-width' | 'along-height'（纸张纹向，缺省沿宽）
  *   products: [{ id?, name?, width, height, quantity,
  *                grain?: 'any' | 'along-width' | 'along-height' }]（纹向要求，缺省不限）
+ * @param {object} [opts]
+ *   sortStrategy: 件序策略（缺省 longest-side-desc，保持旧行为；
+ *                 方案比选依次传入三种策略，见 PIECE_SORTS）
+ *   sequential:   true 时按件序逐件取最优叶放置（方案比选用）；
+ *                 缺省 false 为全局 BSSF（每轮全候选择优，保持旧行为）
  * @returns 布局结果（坐标单位均为 mm，原点在左上角）
  */
-function layout(input) {
+function layout(input, opts = {}) {
+  const sortStrategy = (opts && opts.sortStrategy) || DEFAULT_SORT_STRATEGY;
+  const pieceSort = PIECE_SORTS[sortStrategy];
+  if (!pieceSort) throw new Error(`未知的排样策略：${sortStrategy}`);
+  const sequential = !!(opts && opts.sequential);
   const paperW = Number(input.paperW);
   const paperH = Number(input.paperH);
   const kerf = Number(input.kerf);
@@ -377,14 +419,8 @@ function layout(input) {
     if (q > 0) unplaced.push({ id, name, width: w, height: h, grain, orderNo, quantity: q });
   });
 
-  // 大件优先：最长边降序，再按面积、最短边
-  pieces.sort((a, b) => {
-    const da = Math.max(a.w, a.h) - Math.max(b.w, b.h);
-    if (da !== 0) return -da;
-    const sa = a.w * a.h - b.w * b.h;
-    if (sa !== 0) return -sa;
-    return Math.min(b.w, b.h) - Math.min(a.w, a.h);
-  });
+  // 大件优先：按所选件序策略排序（默认最长边降序 → 面积 → 最短边）
+  pieces.sort(pieceSort);
 
   // 初始整张纸为一个自由区域
   let root = { type: 'free', x: 0, y: 0, w: paperW, h: paperH };
@@ -393,86 +429,84 @@ function layout(input) {
   const remaining = new Map(pieces.map((p) => [p, p]));
   let placedCount = 0;
 
-  while (remaining.size > 0) {
-    let best = null; // { leaf, piece, rotated, w, h, s0..s3 }
+  // BSSF 评分（与原“取余料数组排序”完全等价，但不分配数组）：
+  // 余料总面积 → 最大余料块短边 → 长边 → 是否旋转
+  function score(leaf, piece, rotated) {
+    const w = rotated ? piece.h : piece.w;
+    const h = rotated ? piece.w : piece.h;
+    const W = leaf.w;
+    const H = leaf.h;
+    // 与 splitPlan 完全一致的可切判定
+    const remW = W - w;
+    const remH = H - h;
+    const canV = remW > EPS && remW >= kerf - EPS;
+    const canH = remH > EPS && remH >= kerf - EPS;
+    // 注意：恰好填满（两侧都不可切）时 splitPlan 为 'none'，
+    // 原算法仍以零余料的满分（0,0,0,...）登记该候选，故不能提前跳过。
 
-    // BSSF 评分（与原“取余料数组排序”完全等价，但不分配数组）：
-    // 余料总面积 → 最大余料块短边 → 长边 → 是否旋转
-    function consider(leaf, piece, rotated) {
-      const w = rotated ? piece.h : piece.w;
-      const h = rotated ? piece.w : piece.h;
-      const W = leaf.w;
-      const H = leaf.h;
-      // 与 splitPlan 完全一致的可切判定
-      const remW = W - w;
-      const remH = H - h;
-      const canV = remW > EPS && remW >= kerf - EPS;
-      const canH = remH > EPS && remH >= kerf - EPS;
-      // 注意：恰好填满（两侧都不可切）时 splitPlan 为 'none'，
-      // 原算法仍以零余料的满分（0,0,0,...）登记该候选，故不能提前跳过。
-
-      let leftover = 0;
-      let bigArea = -1;
-      let bigMin = 0;
-      let bigMax = 0;
-      const addFree = (fw, fh) => {
-        if (fw > EPS && fh > EPS) {
-          const a = fw * fh;
-          leftover += a;
-          if (a > bigArea) {
-            bigArea = a;
-            bigMin = fw < fh ? fw : fh;
-            bigMax = fw < fh ? fh : fw;
-          }
+    let leftover = 0;
+    let bigArea = -1;
+    let bigMin = 0;
+    let bigMax = 0;
+    const addFree = (fw, fh) => {
+      if (fw > EPS && fh > EPS) {
+        const a = fw * fh;
+        leftover += a;
+        if (a > bigArea) {
+          bigArea = a;
+          bigMin = fw < fh ? fw : fh;
+          bigMax = fw < fh ? fh : fw;
         }
-      };
-      if (canV && !canH) {
-        addFree(remW - kerf, H);
-      } else if (!canV && canH) {
-        addFree(W, remH - kerf);
-      } else if (remW < remH) {
-        // vv：右侧整带 + 左下块
-        addFree(remW - kerf, H);
-        addFree(w, remH - kerf);
-      } else {
-        // hh（平局也走这里）：底部整带 + 右上块
-        addFree(W, remH - kerf);
-        addFree(remW - kerf, h);
       }
-
-      const s3 = rotated ? 1 : 0;
-      if (
-        !best ||
-        (Math.abs(leftover - best.s0) > EPS ? leftover < best.s0
-          : Math.abs(bigMin - best.s1) > EPS ? bigMin < best.s1
-          : Math.abs(bigMax - best.s2) > EPS ? bigMax < best.s2
-          : s3 < best.s3)
-      ) {
-        best = { leaf, piece, rotated, w, h, s0: leftover, s1: bigMin, s2: bigMax, s3 };
-      }
+    };
+    if (canV && !canH) {
+      addFree(remW - kerf, H);
+    } else if (!canV && canH) {
+      addFree(W, remH - kerf);
+    } else if (remW < remH) {
+      // vv：右侧整带 + 左下块
+      addFree(remW - kerf, H);
+      addFree(w, remH - kerf);
+    } else {
+      // hh（平局也走这里）：底部整带 + 右上块
+      addFree(W, remH - kerf);
+      addFree(remW - kerf, h);
     }
 
-    for (const leaf of freeLeaves) {
-      for (const piece of remaining.keys()) {
-        // 不旋转（成品宽 ∥ 纸张宽）：纹向平行才考虑
-        if (
-          grainAllows(piece.grain, paperGrain, false) &&
-          piece.w <= leaf.w + EPS && piece.h <= leaf.h + EPS
-        ) {
-          consider(leaf, piece, false);
-        }
-        // 旋转 90°（成品宽 ∥ 纸张高）：纹向平行才考虑
-        if (
-          grainAllows(piece.grain, paperGrain, true) &&
-          piece.h <= leaf.w + EPS && piece.w <= leaf.h + EPS
-        ) {
-          consider(leaf, piece, true);
-        }
-      }
+    return { leaf, piece, rotated, w, h, s0: leftover, s1: bigMin, s2: bigMax, s3: rotated ? 1 : 0 };
+  }
+
+  // 候选 c 是否优于当前 best（评分字典序，严格更小才替换，平局保持先到者）
+  function better(c, best) {
+    return Math.abs(c.s0 - best.s0) > EPS ? c.s0 < best.s0
+      : Math.abs(c.s1 - best.s1) > EPS ? c.s1 < best.s1
+      : Math.abs(c.s2 - best.s2) > EPS ? c.s2 < best.s2
+      : c.s3 < best.s3;
+  }
+
+  // 在 leaf 内为 piece 收集两种朝向的候选（纹向平行且几何放得下才考虑）
+  function considerPiece(best, leaf, piece) {
+    // 不旋转（成品宽 ∥ 纸张宽）：纹向平行才考虑
+    if (
+      grainAllows(piece.grain, paperGrain, false) &&
+      piece.w <= leaf.w + EPS && piece.h <= leaf.h + EPS
+    ) {
+      const c = score(leaf, piece, false);
+      if (!best || better(c, best)) best = c;
     }
+    // 旋转 90°（成品宽 ∥ 纸张高）：纹向平行才考虑
+    if (
+      grainAllows(piece.grain, paperGrain, true) &&
+      piece.h <= leaf.w + EPS && piece.w <= leaf.h + EPS
+    ) {
+      const c = score(leaf, piece, true);
+      if (!best || better(c, best)) best = c;
+    }
+    return best;
+  }
 
-    if (!best) break; // 现存任何自由区域都放不下任何余件
-
+  // 提交一次放置：占据叶节点、建树、增量维护自由叶列表
+  function place(best) {
     const { leaf, piece, rotated, w, h } = best;
     piece.rotated = rotated;
     piece.x = leaf.x;
@@ -498,6 +532,31 @@ function layout(input) {
     collectFreeLeaves(node, added);
     const idx = freeLeaves.indexOf(oldLeaf);
     if (idx >= 0) freeLeaves.splice(idx, 1, ...added);
+  }
+
+  if (sequential) {
+    // 顺序放置（方案比选用）：按件序逐件在当前自由区域中取 BSSF 最优位置，
+    // 排不进的件留作未排并继续下一件。自由区域只会被越切越小
+    // （后续自由矩形必为当前某自由矩形的子区域），当前放不下的件
+    // 之后也不可能放下，故单趟遍历即可，必然终止。
+    for (const piece of pieces) {
+      let best = null;
+      for (const leaf of freeLeaves) best = considerPiece(best, leaf, piece);
+      if (best) place(best);
+    }
+  } else {
+    // 全局 BSSF（默认，保持旧行为）：每轮在全部自由区域 × 全部余件中取最优
+    while (remaining.size > 0) {
+      let best = null;
+      for (const leaf of freeLeaves) {
+        for (const piece of remaining.keys()) {
+          best = considerPiece(best, leaf, piece);
+        }
+      }
+
+      if (!best) break; // 现存任何自由区域都放不下任何余件
+      place(best);
+    }
   }
 
   // 统计未排件
@@ -1221,6 +1280,184 @@ function groupKeyOf(row) {
   return row.orderNo === null || row.orderNo === undefined ? '\0' : row.orderNo;
 }
 
+/* ---------------- 方案比选（strategy compare） ---------------- */
+
+/**
+ * 三种确定性排样策略的固定比选顺序（“策略顺序”决胜即按此顺序）：
+ * 面积降序 → 最长边降序 → 宽高差降序。
+ */
+const COMPARE_STRATEGIES = [
+  { key: 'area-desc', label: '面积降序' },
+  { key: 'longest-side-desc', label: '最长边降序' },
+  { key: 'aspect-diff-desc', label: '宽高差降序' },
+];
+
+const COMPARE_OBJECTIVES = ['more-pieces', 'fewer-cuts'];
+
+/** 规范化比选目标：缺省 more-pieces（优先多排） */
+function normalizeObjective(value) {
+  if (value == null || value === '') return 'more-pieces';
+  const s = String(value);
+  if (!COMPARE_OBJECTIVES.includes(s)) {
+    throw new Error('比选目标（objective）必须是 more-pieces（优先多排）或 fewer-cuts（优先省刀）');
+  }
+  return s;
+}
+
+/**
+ * 按比选目标从候选中选出最佳方案，并记录逐项选择依据。
+ *
+ * 决胜规则：
+ *  - more-pieces（优先多排）：已排件数 ↓ → 已排面积 ↓ → 刀数 ↑ → 策略顺序；
+ *  - fewer-cuts（优先省刀）：先排除空方案（一件都排不进），再按
+ *    刀数 ↑ → 已排面积 ↓ → 已排件数 ↓ → 策略顺序。
+ *  - 若全部候选均未排入任何成品，两种目标都不指定最佳方案（best 为 null）。
+ *
+ * @param candidates [{ strategy, label, order, metrics:{...} }]
+ * @param objective  'more-pieces' | 'fewer-cuts'
+ * @returns { best, decision } decision 为逐项选择依据（每步含各候选取值、
+ *   存活候选与中文小结），供接口与前端直接展示
+ */
+function selectBestCandidate(candidates, objective) {
+  const decision = [];
+  const names = (list) => list.map((c) => c.label).join('、');
+  const valuesOf = (pool, keyFn) => pool.map((c) => ({
+    strategy: c.strategy,
+    label: c.label,
+    value: keyFn(c),
+  }));
+
+  // 全部为空：两种目标都不指定最佳方案（未排原因沿用各候选 unplaced）
+  const nonEmpty = candidates.filter((c) => c.metrics.piecesPlaced > 0);
+  if (nonEmpty.length === 0) {
+    decision.push({
+      criterion: 'all-empty',
+      label: '全部候选均未排入成品',
+      values: valuesOf(candidates, (c) => c.metrics.piecesPlaced),
+      survivors: [],
+      note: '三种策略均排不进任何成品，不指定最佳方案（未排原因沿用各候选的未排清单）',
+    });
+    return { best: null, decision };
+  }
+
+  let pool = candidates.slice();
+
+  // 优先省刀：先排除空方案（空方案刀数恒为 0，不参与省刀比较）
+  if (objective === 'fewer-cuts') {
+    const empties = candidates.filter((c) => c.metrics.piecesPlaced === 0);
+    pool = nonEmpty.slice();
+    decision.push({
+      criterion: 'non-empty',
+      label: '排除空方案',
+      values: valuesOf(candidates, (c) => c.metrics.piecesPlaced),
+      survivors: pool.map((c) => c.strategy),
+      note: empties.length === 0
+        ? '三种策略均有排入成品，无需排除'
+        : `${names(empties)} 未排入任何成品，排除出比较`,
+    });
+  }
+
+  const criteria = objective === 'fewer-cuts'
+    ? [
+      ['cutsTotal', '刀数（少者优先）', (c) => c.metrics.cutsTotal, 'asc'],
+      ['placedArea', '已排面积（大者优先）', (c) => c.metrics.placedArea, 'desc'],
+      ['piecesPlaced', '已排件数（多者优先）', (c) => c.metrics.piecesPlaced, 'desc'],
+    ]
+    : [
+      ['piecesPlaced', '已排件数（多者优先）', (c) => c.metrics.piecesPlaced, 'desc'],
+      ['placedArea', '已排面积（大者优先）', (c) => c.metrics.placedArea, 'desc'],
+      ['cutsTotal', '刀数（少者优先）', (c) => c.metrics.cutsTotal, 'asc'],
+    ];
+
+  for (const [criterion, label, keyFn, dir] of criteria) {
+    if (pool.length === 1) break;
+    const vals = pool.map(keyFn);
+    const bestVal = dir === 'asc' ? Math.min(...vals) : Math.max(...vals);
+    const survivors = pool.filter((c) => keyFn(c) === bestVal);
+    const eliminated = pool.filter((c) => keyFn(c) !== bestVal);
+    decision.push({
+      criterion,
+      label,
+      values: valuesOf(pool, keyFn),
+      survivors: survivors.map((c) => c.strategy),
+      note: eliminated.length === 0
+        ? `${names(survivors)} 该项持平（均为 ${bestVal}）`
+        : `${names(survivors)} 该项最优（${bestVal}）；${names(eliminated)} 出局`,
+    });
+    pool = survivors;
+  }
+
+  // 策略顺序决胜：候选生成顺序即固定策略顺序
+  if (pool.length > 1) {
+    const winner = pool.reduce((m, c) => (c.order < m.order ? c : m), pool[0]);
+    decision.push({
+      criterion: 'strategy-order',
+      label: '策略顺序',
+      values: valuesOf(pool, (c) => c.order + 1),
+      survivors: [winner.strategy],
+      note: `各项指标均持平，按固定策略顺序（${names(COMPARE_STRATEGIES)}）取「${winner.label}」`,
+    });
+    pool = [winner];
+  }
+
+  return { best: pool[0], decision };
+}
+
+/**
+ * 方案比选主入口：对同一输入分别按三种确定性策略（面积降序 / 最长边降序 /
+ * 宽高差降序）运行单张排样（断头台、刀缝、旋转与纹向规则完全一致），
+ * 再按比选目标选出最佳方案。
+ *
+ * @param {object} input  同 layout()，另可含 objective：
+ *   'more-pieces'（优先多排，缺省） | 'fewer-cuts'（优先省刀）
+ * @returns {{
+ *   objective: string,
+ *   paper: object,
+ *   candidates: Array,  // 全部候选：策略标识、指标与完整布局（含未排原因）
+ *   best: object|null,  // 最佳方案（全部排不进时为 null）
+ *   decision: Array,    // 逐项选择依据
+ * }}
+ */
+function layoutCompare(input) {
+  const objective = normalizeObjective(input && input.objective);
+
+  const candidates = COMPARE_STRATEGIES.map((s, idx) => {
+    const result = layout(input, { sortStrategy: s.key, sequential: true });
+    return {
+      strategy: s.key,
+      label: s.label,
+      order: idx,
+      selected: false,
+      metrics: {
+        piecesPlaced: result.stats.piecesPlaced,
+        piecesTotal: result.stats.piecesTotal,
+        placedArea: result.stats.placedArea,
+        cutsTotal: result.stats.cutsTotal,
+        areaRatio: result.stats.areaRatio,
+      },
+      layout: result,
+    };
+  });
+
+  const { best, decision } = selectBestCandidate(candidates, objective);
+  if (best) best.selected = true;
+
+  return {
+    objective,
+    paper: candidates[0].layout.paper,
+    candidates,
+    best: best
+      ? {
+          strategy: best.strategy,
+          label: best.label,
+          metrics: { ...best.metrics },
+          layout: best.layout,
+        }
+      : null,
+    decision,
+  };
+}
+
 /** 按组顺序（录入顺序）摊平各订单剩余需求为 remaining 行 */
 function flattenRemaining(groups, demandByKey, idTotalsByGroup, grainBlockedById) {
   const out = [];
@@ -1249,6 +1486,7 @@ function flattenRemaining(groups, demandByKey, idTotalsByGroup, grainBlockedById
 module.exports = {
   layout,
   layoutBatch,
+  layoutCompare,
   grainAllows,
   normalizePaperGrain,
   normalizeProductGrain,
@@ -1258,6 +1496,9 @@ module.exports = {
   normalizeKit,
   normalizePerSet,
   normalizeKitProducts,
+  normalizeObjective,
   planKitSheet,
   buildOrderGroups,
+  selectBestCandidate,
+  COMPARE_STRATEGIES,
 };

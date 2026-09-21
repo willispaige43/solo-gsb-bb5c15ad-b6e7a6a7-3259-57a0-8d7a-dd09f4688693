@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <h1>单张纸直线裁切试排</h1>
-    <p class="subtitle">断头台式裁切 · 每次一刀切到底、一分为二 · 成品允许旋转 90°（受纹向约束） · 刀缝不侵占成品 · 支持单张试排、批量排产与多纸型成本排产</p>
+    <p class="subtitle">断头台式裁切 · 每次一刀切到底、一分为二 · 成品允许旋转 90°（受纹向约束） · 刀缝不侵占成品 · 单张试排三策略方案比选 · 支持批量排产与多纸型成本排产</p>
   </header>
 
   <main class="layout">
@@ -48,6 +48,17 @@
         <label><input type="radio" name="mode" value="single" checked /> 单张试排</label>
         <label><input type="radio" name="mode" value="batch" /> 批量排产</label>
         <label><input type="radio" name="mode" value="cost" /> 多纸型成本排产</label>
+      </div>
+      <div id="compareOpts" class="compare-opts">
+        <span class="compare-title">方案比选目标（单张试排按三种策略分别排样后择优）</span>
+        <div class="segmented" role="group" aria-label="比选目标">
+          <label><input type="radio" name="objective" value="more-pieces" checked /><span>优先多排</span></label>
+          <label><input type="radio" name="objective" value="fewer-cuts" /><span>优先省刀</span></label>
+        </div>
+        <p class="hint">同一输入分别按 <b>面积降序 / 最长边降序 / 宽高差降序</b> 三种确定性策略排样（断头台、刀缝、旋转与纹向规则一致）：
+          「优先多排」依次按已排件数、已排面积、刀数少、策略顺序择优；
+          「优先省刀」排除空方案后依次按刀数少、已排面积、已排件数、策略顺序择优。
+          全部排不进时不指定最佳方案。</p>
       </div>
       <div id="isolateOpts" class="isolate-opts" hidden>
         <label class="check-line">
@@ -108,6 +119,7 @@
 
     <section class="panel result-panel">
       <h2>排料结果</h2>
+      <div id="compareBar" class="compare-bar" hidden></div>
       <div id="batchBar" class="batch-bar" hidden></div>
       <div id="costBar" class="batch-bar" hidden></div>
       <div id="kitProgress" class="kit-progress" hidden></div>

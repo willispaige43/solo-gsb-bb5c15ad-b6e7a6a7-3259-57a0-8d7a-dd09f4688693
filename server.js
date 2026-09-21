@@ -2,7 +2,7 @@
 
 const path = require('node:path');
 const express = require('express');
-const { layout, layoutBatch } = require('./src/packer');
+const { layout, layoutBatch, layoutCompare } = require('./src/packer');
 const { layoutCostBatch } = require('./src/cost');
 
 const app = express();
@@ -19,6 +19,17 @@ app.post('/api/layout', (req, res) => {
   try {
     const body = req.body || {};
     const result = layout(body);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || '输入无效' });
+  }
+});
+
+// 方案比选：同一输入按三种确定性策略分别试排，按比选目标择优
+app.post('/api/layout/compare', (req, res) => {
+  try {
+    const body = req.body || {};
+    const result = layoutCompare(body);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message || '输入无效' });

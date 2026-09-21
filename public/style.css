@@ -86,6 +86,97 @@ body {
 }
 .mode-switch input { width: auto; }
 
+/* 方案比选：目标分段控件 */
+.compare-opts {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.compare-opts .compare-title {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+.segmented label { position: relative; cursor: pointer; }
+.segmented input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.segmented span {
+  display: block;
+  padding: 7px 18px;
+  font-size: 13px;
+  color: var(--ink);
+  border-left: 1px solid var(--line);
+}
+.segmented label:first-child span { border-left: none; }
+.segmented input:checked + span {
+  background: var(--brand);
+  color: #fff;
+  font-weight: 600;
+}
+.segmented input:focus-visible + span {
+  box-shadow: inset 0 0 0 3px rgba(28, 100, 242, 0.35);
+}
+.compare-opts .hint { margin: 8px 0 0; line-height: 1.6; }
+
+/* 方案比选：结果栏 */
+.compare-bar { margin-bottom: 12px; }
+.compare-obj {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: -4px 0 8px;
+}
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-bottom: 8px;
+}
+.compare-table th, .compare-table td {
+  border: 1px solid var(--line);
+  padding: 5px 8px;
+  text-align: left;
+}
+.compare-table th { background: #f0f3f8; }
+.compare-table td.num, .compare-table th.num { text-align: right; }
+.compare-table tr.winner { background: #ebfbee; font-weight: 600; }
+.best-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #2f9e44;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.decision { font-size: 12.5px; }
+.decision summary {
+  cursor: pointer;
+  color: #102a56;
+  font-weight: 600;
+}
+.decision ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+}
+.decision li { margin: 2px 0; }
+
 .isolate-opts {
   border: 1px solid #bac8ff;
   background: #f0f5ff;
@@ -364,6 +455,17 @@ body {
 .sheet-tabs button.active {
   background: var(--brand);
   border-color: var(--brand);
+  color: #fff;
+}
+/* 方案比选：最佳候选标签突出显示 */
+.sheet-tabs button.best {
+  border-color: #2f9e44;
+  color: #1a6b3c;
+  font-weight: 700;
+}
+.sheet-tabs button.best.active {
+  background: #2f9e44;
+  border-color: #2f9e44;
   color: #fff;
 }
 

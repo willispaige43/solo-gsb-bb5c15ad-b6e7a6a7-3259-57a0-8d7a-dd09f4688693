@@ -12,6 +12,11 @@ function currentMode() {
   return el ? el.value : 'single';
 }
 
+function currentObjective() {
+  const el = document.querySelector('input[name="objective"]:checked');
+  return el ? el.value : 'more-pieces';
+}
+
 function colorFor(id) {
   let h = 0;
   for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -231,6 +236,8 @@ function readForm() {
     paperW, paperH, paperGrain: $('paperGrain').value, kerf,
     products: readProducts(), isolateOrders,
   };
+  // 单张试排以方案比选为入口：随请求带上比选目标
+  if (mode === 'single') payload.objective = currentObjective();
   if (kit) payload.kit = kit;
 
   if (mode === 'batch') {
@@ -468,6 +475,107 @@ function renderUnplaced(r, heading = '排不下的成品') {
   `;
 }
 
+/* ---------------- 单张方案比选 ---------------- */
+
+let compareState = null; // 最近一次单张方案比选结果
+
+const STRATEGY_LABELS = {
+  'area-desc': '面积降序',
+  'longest-edge-desc': '最长边降序',
+  'aspect-diff-desc': '宽高差降序',
+};
+
+function strategyLabel(id) {
+  return STRATEGY_LABELS[id] || id;
+}
+
+function metricText(criterion, value) {
+  if (criterion === 'piecesPlaced') return `${value} 件`;
+  if (criterion === 'placedArea') return `${fmt(value)} mm²`;
+  if (criterion === 'cutsTotal') return `${value} 刀`;
+  return String(value);
+}
+
+function renderCompare(data) {
+  compareState = data;
+  const bestCand = data.candidates.find((c) => c.best) || null;
+
+  const banner = bestCand
+    ? `✔ 最佳方案：<b>${bestCand.label}</b>（目标：${data.objectiveLabel}）——已排 ${bestCand.metrics.piecesPlaced}/${bestCand.metrics.piecesTotal} 件、${fmt(bestCand.metrics.placedArea)} mm²、${bestCand.metrics.cutsTotal} 刀`
+    : '⚠ 三种策略均排不进任何成品，<b>不指定最佳方案</b>（未排原因见下方明细表）。';
+
+  const rows = data.candidates.map((c) => `
+    <tr class="${c.best ? 'winner' : ''}">
+      <td>${c.label}${c.best ? ' <span class="best-badge">最佳</span>' : ''}</td>
+      <td class="num">${c.metrics.piecesPlaced} / ${c.metrics.piecesTotal}</td>
+      <td class="num">${fmt(c.metrics.placedArea)}</td>
+      <td class="num">${c.metrics.cutsTotal}</td>
+      <td class="num">${(c.metrics.areaRatio * 100).toFixed(1)}%</td>
+      <td>${c.best ? '✔ 选用' : ''}</td>
+    </tr>`).join('');
+
+  let stepsHtml;
+  if (!bestCand) {
+    stepsHtml = '<p class="compare-note">三种策略均未排入任何成品，无决胜过程；未排原因（尺寸不足 / 纹向受限）随各候选与顶层结果返回。</p>';
+  } else {
+    const excludedNote = data.decision.excluded && data.decision.excluded.length
+      ? `<li>优先省刀先<b>排除一件都排不进的空方案</b>：${data.decision.excluded.map(strategyLabel).join('、')}</li>`
+      : '';
+    const items = data.decision.steps.map((st) => {
+      if (st.criterion === 'seq') {
+        return `<li>前序指标均并列，按<b>策略顺序</b>（面积降序 → 最长边降序 → 宽高差降序）取 <b>${strategyLabel(st.kept[0])}</b>。</li>`;
+      }
+      const vals = st.values
+        .map((v) => `${strategyLabel(v.strategy)} ${metricText(st.criterion, v.value)}`)
+        .join('，');
+      const tail = st.eliminated.length
+        ? `淘汰 ${st.eliminated.map(strategyLabel).join('、')}`
+        : '全员并列，进入下一指标';
+      return `<li><b>${st.label}</b>：${vals} → ${tail}</li>`;
+    }).join('');
+    stepsHtml = `<ol class="decision-steps">${excludedNote}${items}</ol>`;
+  }
+
+  $('compareBar').innerHTML = `
+    <div class="stop-reason ${bestCand ? 'ok' : 'warn'}">${banner}</div>
+    <h3 class="compare-h">候选方案指标（同一输入 × 三种确定性排样策略）</h3>
+    <table class="rank-table compare-table">
+      <thead><tr>
+        <th>排样策略</th><th class="num">已排/总件数</th><th class="num">已排面积 (mm²)</th>
+        <th class="num">总刀数</th><th class="num">面积占比</th><th>结果</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <h3 class="compare-h">逐项选择依据（目标：${data.objectiveLabel}）</h3>
+    ${stepsHtml}
+  `;
+  $('compareBar').hidden = false;
+
+  // 候选标签页：最佳项高亮，并默认切换到最佳候选
+  renderSheetTabs(data.candidates, (c) => `${c.label}${c.best ? ' ✔ 最佳' : ''}`);
+  [...$('sheetTabs').querySelectorAll('button')].forEach((b, i) => {
+    b.classList.toggle('best', !!data.candidates[i].best);
+  });
+  const bestIdx = data.candidates.findIndex((c) => c.best);
+  showCompareCandidate(bestIdx >= 0 ? bestIdx : 0);
+}
+
+function showCompareCandidate(i) {
+  if (!compareState || !compareState.candidates[i]) return;
+  setActiveTab(i);
+  const cand = compareState.candidates[i];
+  renderStats(cand.layout);
+  renderSvg(cand.layout);
+  renderCutList(cand.layout);
+  renderUnplaced(cand.layout);
+}
+
+function clearCompareUi() {
+  compareState = null;
+  $('compareBar').hidden = true;
+  $('compareBar').innerHTML = '';
+}
+
 /* ---------------- 批量排产 ---------------- */
 
 let batchState = null; // 最近一次批量排产结果
@@ -655,6 +763,7 @@ function clearBatchUi() {
   batchState = null;
   $('batchBar').hidden = true;
   $('batchBar').innerHTML = '';
+  clearCompareUi();
   clearOrderSummary();
   clearKitProgress();
 }
@@ -853,6 +962,7 @@ function clearCostUi() {
   $('sheetMeta').innerHTML = '';
   $('rankList').hidden = true;
   $('rankList').innerHTML = '';
+  clearCompareUi();
   clearOrderSummary();
   clearKitProgress();
 }
@@ -868,7 +978,8 @@ function renderSheetTabs(sheets, label) {
     [...tabs.querySelectorAll('button')].forEach((b) =>
       b.addEventListener('click', () => {
         const i = Number(b.dataset.i);
-        if (costState) showCostSheet(i);
+        if (compareState) showCompareCandidate(i);
+        else if (costState) showCostSheet(i);
         else showBatchSheet(i);
       })
     );
@@ -900,7 +1011,7 @@ async function generate() {
   $('generate').disabled = true;
   try {
     const url = mode === 'cost' ? '/api/layout/cost'
-      : mode === 'batch' ? '/api/layout/batch' : '/api/layout';
+      : mode === 'batch' ? '/api/layout/batch' : '/api/layout/compare';
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -918,10 +1029,7 @@ async function generate() {
       clearBatchUi();
       clearCostUi();
       clearOrderSummary();
-      renderStats(data);
-      renderSvg(data);
-      renderCutList(data);
-      renderUnplaced(data);
+      renderCompare(data);
     }
   } catch (e) {
     errBox.textContent = e.message;
@@ -945,6 +1053,8 @@ document.querySelectorAll('input[name="mode"]').forEach((r) =>
     const cost = mode === 'cost';
     $('batchOpts').hidden = !batch;
     $('costOpts').hidden = !cost;
+    // 方案比选目标仅用于单张试排
+    $('compareOpts').hidden = mode !== 'single';
     // 订单隔离与成套生产仅对批量 / 多纸型排产有意义
     $('isolateOpts').hidden = mode === 'single';
     $('kitOpts').hidden = mode === 'single';

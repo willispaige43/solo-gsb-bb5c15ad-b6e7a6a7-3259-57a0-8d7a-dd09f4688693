@@ -4,6 +4,7 @@ const path = require('node:path');
 const express = require('express');
 const { layout, layoutBatch } = require('./src/packer');
 const { layoutCostBatch } = require('./src/cost');
+const { layoutCompare } = require('./src/compare');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -19,6 +20,17 @@ app.post('/api/layout', (req, res) => {
   try {
     const body = req.body || {};
     const result = layout(body);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || '输入无效' });
+  }
+});
+
+// 单张方案比选：同一输入分别按三种件序策略排样，按目标（优先多排/优先省刀）决胜
+app.post('/api/layout/compare', (req, res) => {
+  try {
+    const body = req.body || {};
+    const result = layoutCompare(body);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message || '输入无效' });

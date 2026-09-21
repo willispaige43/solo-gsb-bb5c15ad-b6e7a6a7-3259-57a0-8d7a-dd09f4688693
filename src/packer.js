@@ -197,6 +197,63 @@ function lexLess(a, b) {
   return false;
 }
 
+/* ---------------- 件序策略（方案比选共用） ---------------- */
+
+/**
+ * 确定性件序策略：比较器均为全序（同分最终由稳定排序落到录入顺序），
+ * 同一输入必然产出同一布局。'longest-edge-desc' 是既有默认策略，
+ * 单张/批量/多纸型的既有行为完全不变；方案比选（src/compare.js）
+ * 对同一输入分别运行三种策略后按用户目标决胜。
+ */
+const PIECE_SORT_STRATEGIES = [
+  {
+    id: 'area-desc',
+    label: '面积降序',
+    // 面积 ↓ → 最长边 ↓ → 最短边 ↓
+    compare(a, b) {
+      const sa = a.w * a.h - b.w * b.h;
+      if (sa !== 0) return -sa;
+      const da = Math.max(a.w, a.h) - Math.max(b.w, b.h);
+      if (da !== 0) return -da;
+      return Math.min(b.w, b.h) - Math.min(a.w, a.h);
+    },
+  },
+  {
+    id: 'longest-edge-desc',
+    label: '最长边降序',
+    // 最长边 ↓ → 面积 ↓ → 最短边 ↓（既有默认，保持旧行为）
+    compare(a, b) {
+      const da = Math.max(a.w, a.h) - Math.max(b.w, b.h);
+      if (da !== 0) return -da;
+      const sa = a.w * a.h - b.w * b.h;
+      if (sa !== 0) return -sa;
+      return Math.min(b.w, b.h) - Math.min(a.w, a.h);
+    },
+  },
+  {
+    id: 'aspect-diff-desc',
+    label: '宽高差降序',
+    // 宽高差 |w−h| ↓ → 面积 ↓ → 最长边 ↓ → 最短边 ↓
+    compare(a, b) {
+      const da = Math.abs(a.w - a.h) - Math.abs(b.w - b.h);
+      if (da !== 0) return -da;
+      const sa = a.w * a.h - b.w * b.h;
+      if (sa !== 0) return -sa;
+      const la = Math.max(a.w, a.h) - Math.max(b.w, b.h);
+      if (la !== 0) return -la;
+      return Math.min(b.w, b.h) - Math.min(a.w, a.h);
+    },
+  },
+];
+
+const DEFAULT_SORT_STRATEGY = 'longest-edge-desc';
+
+function sortStrategyById(id) {
+  const hit = PIECE_SORT_STRATEGIES.find((s) => s.id === id);
+  if (!hit) throw new Error(`未知件序策略：${id}`);
+  return hit;
+}
+
 /**
  * 在 W×H 区域左上角放置 w×h 后，计算切分方案（纯几何）。
  * 规则：
@@ -338,9 +395,15 @@ function collectFreeLeaves(node, out) {
  *   paperGrain: 'along-width' | 'along-height'（纸张纹向，缺省沿宽）
  *   products: [{ id?, name?, width, height, quantity,
  *                grain?: 'any' | 'along-width' | 'along-height' }]（纹向要求，缺省不限）
+ * @param {object} [options]
+ *   sortStrategy: 件序策略 id（见 PIECE_SORT_STRATEGIES，
+ *                 缺省 'longest-edge-desc'，与既有行为一致）
  * @returns 布局结果（坐标单位均为 mm，原点在左上角）
  */
-function layout(input) {
+function layout(input, options) {
+  const sortStrategy = sortStrategyById(
+    options && options.sortStrategy != null ? options.sortStrategy : DEFAULT_SORT_STRATEGY
+  );
   const paperW = Number(input.paperW);
   const paperH = Number(input.paperH);
   const kerf = Number(input.kerf);
@@ -377,14 +440,8 @@ function layout(input) {
     if (q > 0) unplaced.push({ id, name, width: w, height: h, grain, orderNo, quantity: q });
   });
 
-  // 大件优先：最长边降序，再按面积、最短边
-  pieces.sort((a, b) => {
-    const da = Math.max(a.w, a.h) - Math.max(b.w, b.h);
-    if (da !== 0) return -da;
-    const sa = a.w * a.h - b.w * b.h;
-    if (sa !== 0) return -sa;
-    return Math.min(b.w, b.h) - Math.min(a.w, a.h);
-  });
+  // 大件优先：按所选件序策略排序（缺省最长边降序，再按面积、最短边）
+  pieces.sort(sortStrategy.compare);
 
   // 初始整张纸为一个自由区域
   let root = { type: 'free', x: 0, y: 0, w: paperW, h: paperH };
@@ -1260,4 +1317,6 @@ module.exports = {
   normalizeKitProducts,
   planKitSheet,
   buildOrderGroups,
+  PIECE_SORT_STRATEGIES,
+  DEFAULT_SORT_STRATEGY,
 };
